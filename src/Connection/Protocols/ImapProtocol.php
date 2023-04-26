@@ -431,7 +431,6 @@ class ImapProtocol extends Protocol {
      * @return Response
      * @throws AuthFailedException
      * @throws ImapBadRequestException
-     * @throws ImapServerErrorException
      */
     public function login(string $user, string $password): Response {
         try {
@@ -439,7 +438,7 @@ class ImapProtocol extends Protocol {
             $params = $this->escapeString($user, $password);
 
             return $this->requestAndResponse($command, $params, true);
-        } catch (RuntimeException $e) {
+        } catch (RuntimeException|ImapServerErrorException $e) {
             throw new AuthFailedException("failed to authenticate", 0, $e);
         }
     }
@@ -451,31 +450,15 @@ class ImapProtocol extends Protocol {
      *
      * @return Response
      * @throws AuthFailedException
+     * @throws ImapBadRequestException
      */
     public function authenticate(string $user, string $token): Response {
         try {
-            $authenticateParams = ['XOAUTH2', base64_encode("user=$user\1auth=Bearer $token\1\1")];
-            $response = $this->sendRequest('AUTHENTICATE', $authenticateParams);
+            $command = 'AUTHENTICATE';
+            $params = ['XOAUTH2', base64_encode("user=$user\1auth=Bearer $token\1\1")];
 
-            while (true) {
-                $tokens = "";
-                $is_plus = $this->readLine($response, $tokens, '+', true);
-                if ($is_plus) {
-                    // try to log the challenge somewhere where it can be found
-                    error_log("got an extra server challenge: $tokens");
-                    // respond with an empty response.
-                    $response->stack($this->sendRequest(''));
-                } else {
-                    if (preg_match('/^NO /i', $tokens) ||
-                        preg_match('/^BAD /i', $tokens)) {
-                        error_log("got failure response: $tokens");
-                        return $response->addError("got failure response: $tokens");
-                    } else if (preg_match("/^OK /i", $tokens)) {
-                        return $response->setResult(is_array($tokens) ? $tokens : [$tokens]);
-                    }
-                }
-            }
-        } catch (RuntimeException $e) {
+            return $this->requestAndResponse($command, $params, true);
+        } catch (RuntimeException|ImapServerErrorException $e) {
             throw new AuthFailedException("failed to authenticate", 0, $e);
         }
     }
