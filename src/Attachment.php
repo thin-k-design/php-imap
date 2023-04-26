@@ -29,7 +29,9 @@ use Webklex\PHPIMAP\Support\Masks\AttachmentMask;
  * @property string content_type
  * @property string id
  * @property string name
- * @property string disposition
+ * @property string description
+ * @property string filename
+ * @property ?string disposition
  * @property string img_src
  *
  * @method integer getPartNumber()
@@ -54,30 +56,32 @@ class Attachment {
     /**
      * @var Message $oMessage
      */
-    protected $oMessage;
+    protected Message $oMessage;
 
     /**
      * Used config
      *
      * @var array $config
      */
-    protected $config = [];
+    protected array $config = [];
 
     /** @var Part $part */
-    protected $part;
+    protected Part $part;
 
     /**
      * Attribute holder
      *
      * @var array $attributes
      */
-    protected $attributes = [
+    protected array $attributes = [
         'content' => null,
         'type' => null,
         'part_number' => 0,
         'content_type' => null,
         'id' => null,
         'name' => null,
+        'filename' => null,
+        'description' => null,
         'disposition' => null,
         'img_src' => null,
         'size' => null,
@@ -88,7 +92,7 @@ class Attachment {
      *
      * @var string $mask
      */
-    protected $mask = AttachmentMask::class;
+    protected string $mask = AttachmentMask::class;
 
     /**
      * Attachment constructor.
@@ -102,9 +106,16 @@ class Attachment {
         $this->part = $part;
         $this->part_number = $part->part_number;
 
-        $default_mask = $this->oMessage->getClient()->getDefaultAttachmentMask();
-        if($default_mask != null) {
-            $this->mask = $default_mask;
+        if ($this->oMessage->getClient()) {
+            $default_mask = $this->oMessage->getClient()?->getDefaultAttachmentMask();
+            if($default_mask != null) {
+                $this->mask = $default_mask;
+            }
+        }else{
+            $default_mask  = ClientManager::getMask("attachment");
+            if($default_mask != ""){
+                $this->mask =$default_mask;
+            }
         }
 
         $this->findType();
@@ -169,43 +180,24 @@ class Attachment {
     /**
      * Determine the structure type
      */
-    protected function findType() {
-        switch ($this->part->type) {
-            case IMAP::ATTACHMENT_TYPE_MESSAGE:
-                $this->type = 'message';
-                break;
-            case IMAP::ATTACHMENT_TYPE_APPLICATION:
-                $this->type = 'application';
-                break;
-            case IMAP::ATTACHMENT_TYPE_AUDIO:
-                $this->type = 'audio';
-                break;
-            case IMAP::ATTACHMENT_TYPE_IMAGE:
-                $this->type = 'image';
-                break;
-            case IMAP::ATTACHMENT_TYPE_VIDEO:
-                $this->type = 'video';
-                break;
-            case IMAP::ATTACHMENT_TYPE_MODEL:
-                $this->type = 'model';
-                break;
-            case IMAP::ATTACHMENT_TYPE_TEXT:
-                $this->type = 'text';
-                break;
-            case IMAP::ATTACHMENT_TYPE_MULTIPART:
-                $this->type = 'multipart';
-                break;
-            default:
-                $this->type = 'other';
-                break;
-        }
+    protected function findType(): void {
+        $this->type = match ($this->part->type) {
+            IMAP::ATTACHMENT_TYPE_MESSAGE => 'message',
+            IMAP::ATTACHMENT_TYPE_APPLICATION => 'application',
+            IMAP::ATTACHMENT_TYPE_AUDIO => 'audio',
+            IMAP::ATTACHMENT_TYPE_IMAGE => 'image',
+            IMAP::ATTACHMENT_TYPE_VIDEO => 'video',
+            IMAP::ATTACHMENT_TYPE_MODEL => 'model',
+            IMAP::ATTACHMENT_TYPE_TEXT => 'text',
+            IMAP::ATTACHMENT_TYPE_MULTIPART => 'multipart',
+            default => 'other',
+        };
     }
 
     /**
      * Fetch the given attachment
      */
-    protected function fetch() {
-
+    protected function fetch(): void {
         $content = $this->part->content;
 
         $this->content_type = $this->part->content_type;
@@ -213,26 +205,40 @@ class Attachment {
 
         if (($id = $this->part->id) !== null) {
             $this->id = str_replace(['<', '>'], '', $id);
+        }else{
+            $this->id = hash("sha256", uniqid((string) rand(10000, 99999), true));
         }
 
         $this->size = $this->part->bytes;
         $this->disposition = $this->part->disposition;
 
         if (($filename = $this->part->filename) !== null) {
-            $this->setName($filename);
-        } elseif (($name = $this->part->name) !== null) {
-            $this->setName($name);
-        }else {
-            $this->setName("undefined");
+            $this->filename = $this->decodeName($filename);
+        }
+
+        if (($name = $this->part->name) !== null) {
+            $this->name = $this->decodeName($name);
+        }
+        if (!$this->name && $this->filename != "") {
+            $this->name = $this->filename;
         }
 
         if (IMAP::ATTACHMENT_TYPE_MESSAGE == $this->part->type) {
             if ($this->part->ifdescription) {
-                $this->setName($this->part->description);
-            } else {
-                $this->setName($this->part->subtype);
+                if (!$this->name) {
+                    $this->name = $this->part->description;
+                }
+                $this->description = $this->part->description;
+            } else if (!$this->name) {
+                $this->name = $this->part->subtype;
             }
         }
+
+        if (!$this->filename) {
+            $this->filename = $this->name;
+        }
+
+        $this->attributes = array_merge($this->part->getHeader()->getAttributes(), $this->attributes);
     }
 
     /**
@@ -242,25 +248,43 @@ class Attachment {
      *
      * @return boolean
      */
-    public function save(string $path, $filename = null): bool {
-        $filename = $filename ?: $this->getName();
+    public function save(string $path, string $filename = null): bool {
+        $filename = $filename ?? $this->filename ?? $this->name ?? $this->id;
 
-        return file_put_contents($path.$filename, $this->getContent()) !== false;
+        return file_put_contents($path.DIRECTORY_SEPARATOR.$filename, $this->getContent()) !== false;
     }
 
     /**
-     * Set the attachment name and try to decode it
+     * Decode a given name
      * @param $name
+     *
+     * @return string
      */
-    public function setName($name) {
-        $decoder = $this->config['decoder']['attachment'];
+    public function decodeName($name): string {
         if ($name !== null) {
-            if($decoder === 'utf-8' && extension_loaded('imap')) {
-                $this->name = \imap_utf8($name);
-            }else{
-                $this->name = mb_decode_mimeheader($name);
+            if (str_contains($name, "''")) {
+                $parts = explode("''", $name);
+                if (EncodingAliases::has($parts[0])) {
+                    $name = implode("''", array_slice($parts, 1));
+                }
             }
+
+            $decoder = $this->config['decoder']['message'];
+            if($decoder === 'utf-8' && extension_loaded('imap')) {
+                $name = \imap_utf8($name);
+            }
+
+            if (preg_match('/=\?([^?]+)\?(Q|B)\?(.+)\?=/i', $name, $matches)) {
+                $name = $this->part->getHeader()->decode($name);
+            }
+
+            // check if $name is url encoded
+            if (preg_match('/%[0-9A-F]{2}/i', $name)) {
+                $name = urldecode($name);
+            }
+            return $name;
         }
+        return "";
     }
 
     /**
@@ -268,7 +292,7 @@ class Attachment {
      *
      * @return string|null
      */
-    public function getMimeType(){
+    public function getMimeType(): ?string {
         return (new \finfo())->buffer($this->getContent(), FILEINFO_MIME_TYPE);
     }
 
@@ -277,16 +301,26 @@ class Attachment {
      *
      * @return string|null
      */
-    public function getExtension(){
-        $deprecated_guesser = "\Symfony\Component\HttpFoundation\File\MimeType\ExtensionGuesser";
-        if (class_exists($deprecated_guesser) !== false){
-            /** @var \Symfony\Component\HttpFoundation\File\MimeType\ExtensionGuesser $deprecated_guesser */
-            return $deprecated_guesser::getInstance()->guess($this->getMimeType());
-        }
+    public function getExtension(): ?string {
+        $extension = null;
         $guesser = "\Symfony\Component\Mime\MimeTypes";
-        /** @var Symfony\Component\Mime\MimeTypes $guesser */
-        $extensions = $guesser::getDefault()->getExtensions($this->getMimeType());
-        return $extensions[0] ?? null;
+        if (class_exists($guesser) !== false) {
+            /** @var Symfony\Component\Mime\MimeTypes $guesser */
+            $extensions = $guesser::getDefault()->getExtensions($this->getMimeType());
+            $extension = $extensions[0] ?? null;
+        }
+        if ($extension === null) {
+            $deprecated_guesser = "\Symfony\Component\HttpFoundation\File\MimeType\ExtensionGuesser";
+            if (class_exists($deprecated_guesser) !== false){
+                /** @var \Symfony\Component\HttpFoundation\File\MimeType\ExtensionGuesser $deprecated_guesser */
+                $extension = $deprecated_guesser::getInstance()->guess($this->getMimeType());
+            }
+        }
+        if ($extension === null) {
+            $extensions = explode(".", $this->filename);
+            $extension = end($extensions);
+        }
+        return $extension;
     }
 
     /**
@@ -335,7 +369,7 @@ class Attachment {
      * @return mixed
      * @throws MaskNotFoundException
      */
-    public function mask($mask = null){
+    public function mask(string $mask = null): mixed {
         $mask = $mask !== null ? $mask : $this->mask;
         if(class_exists($mask)){
             return new $mask($this);
