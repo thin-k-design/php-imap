@@ -91,6 +91,24 @@ class ImapProtocol extends Protocol {
     }
 
     /**
+     * Check if the current session is connected
+     *
+     * @return bool
+     */
+    public function connected(): bool {
+        if ((bool)$this->stream) {
+            try {
+                $response = $this->requestAndResponse('NOOP');
+                return true;
+            }
+            catch (ImapServerErrorException|RuntimeException) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Enable tls on the current connection
      *
      * @throws ConnectionFailedException
@@ -113,16 +131,12 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function nextLine(Response $response): string {
-        $line = "";
-        while (($next_char = fread($this->stream, 1)) !== false && !in_array($next_char, ["","\n"])) {
-            $line .= $next_char;
+        $line = fgets($this->stream);
+        if ($line === false) {
+            throw new RuntimeException('empty response: '.error_get_last()['message'] ?? 'no errors found');
         }
-        if ($line === "" && ($next_char === false || $next_char === "")) {
-            throw new RuntimeException('empty response');
-        }
-        $line .= "\n";
         $response->addResponse($line);
-        if ($this->debug) echo "<< " . $line;
+        if ($this->debug) echo "<< ".$line;
         return $line;
     }
 
